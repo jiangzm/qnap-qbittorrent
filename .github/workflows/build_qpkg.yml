@@ -1,0 +1,389 @@
+name: Build qBittorrent QPKG
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: '变量环境'
+        type: choice
+        required: false
+        default: 'production'
+        options:
+          - development
+          - production
+      version:
+        description: 'qBittorrent版本号(默认最新版)'
+        required: false
+        default: ''
+      notes:
+        description: '更新说明(支持Markdown)'
+        required: false
+        type: string
+        default: ''
+      force_build:
+        description: '强制构建(已存在则覆盖)'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Determine Version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+            echo "使用手动指定版本: $VERSION"
+          else
+            echo "获取 qBittorrent 最新版本..."
+            VERSION=$(curl -s "https://api.github.com/repos/jiangzm/qbittorrent-nox-static/releases/latest" \
+              | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | sed 's/^v//' || echo "")
+
+            if [ -z "$VERSION" ]; then
+              echo "无法获取最新版本号"
+              exit 1
+            fi
+            echo "自动获取到版本: $VERSION"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check Repo Tags
+        id: check
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          FORCE="${{ github.event.inputs.force_build }}"
+
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            if [ "$FORCE" = "true" ]; then
+              echo "版本 v$VERSION 已存在，但强制构建已启用"
+              echo "exists=false" >> $GITHUB_OUTPUT
+              git tag -d "v$VERSION" 2>/dev/null || true
+              git push origin ":refs/tags/v$VERSION" 2>/dev/null || true
+            else
+              echo "版本 v$VERSION 已存在，跳过构建"
+              echo "exists=true" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "版本 v$VERSION 是新版本，开始构建"
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download qBittorrent Binaries
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          BASE_URL="https://github.com/jiangzm/qbittorrent-nox-static/releases/download/v${VERSION}"
+
+          declare -A ARCH_FILES=(
+            ["x86_64"]="qbittorrent-nox-${VERSION}_lt2.1-aarch64"
+            ["arm_64"]="qbittorrent-nox-${VERSION}_lt2.1-x86_64"
+          )
+
+          mkdir -p $RUNNER_TEMP/qbittorrent-bin
+
+          for arch in "${!ARCH_FILES[@]}"; do
+            file="${ARCH_FILES[$arch]}"
+            folder="$RUNNER_TEMP/qbittorrent-bin/${arch}"
+            mkdir -p "$folder"
+
+            echo "下载 ${arch}: ${file}"
+            if wget -q "${BASE_URL}/${file}" -O "$folder/qbittorrent-nox"; then
+              echo "  提取完成: $folder/qbittorrent-nox"
+              mkdir -p "$GITHUB_WORKSPACE/$arch"
+              mv "$folder/qbittorrent-nox" "$GITHUB_WORKSPACE/$arch/"
+              rm -f "$folder/${file}"
+            else
+              echo "  下载失败: ${BASE_URL}/${file}"
+              exit 1
+            fi
+          done
+          echo "所有二进制文件下载完成"
+
+      - name: Install Dependencies
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends git-core ca-certificates wget python-is-python3 make gcc
+
+      - name: Install QDK
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          git clone https://github.com/qnap-dev/QDK.git $RUNNER_TEMP/QDK
+          cd $RUNNER_TEMP/QDK
+          sudo ./InstallToUbuntu.sh install
+          echo "/usr/share/QDK/bin" >> $GITHUB_PATH
+
+      - name: Update Version Numbers
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          sed -i 's/^QPKG_VER=.*/QPKG_VER="'"${VERSION}"'"/' qpkg.cfg
+          echo "qpkg.cfg 已更新:"
+          grep "^QPKG_VER=" qpkg.cfg
+          
+          sed -i 's/^Ver=.*/Ver='"${VERSION}"'/' package_routines
+          echo "package_routines 已更新:"
+          grep "^Ver=" package_routines
+
+      - name: Build QPKG
+        if: steps.check.outputs.exists == 'false'
+        env:
+          CA_CRT: ${{ secrets.CA_CRT }}
+          SIGN_CRT: ${{ secrets.SIGN_CRT }}
+          SIGN_KEY: ${{ secrets.SIGN_KEY }}
+        run: |
+          echo "输入的环境变量为: ${{ github.event.inputs.environment }}"
+          qbuild --exclude ".git" --exclude ".github" --exclude "build" -v
+
+          if [ ! -d "build" ] || [ -z "$(ls -A build/*.qpkg 2>/dev/null)" ]; then
+            echo "QPKG 构建失败"
+            exit 1
+          fi
+
+          if [ -n "$SIGN_CRT" ] && [ -n "$SIGN_KEY" ]; then
+            echo "找到签名证书和私钥，准备代码签名证书文件"
+
+            CERTS_PATH="$RUNNER_TEMP/certs"
+            CRT="$CERTS_PATH/signer.crt"
+            KEY="$CERTS_PATH/signer.key"
+
+            mkdir -p "$CERTS_PATH"
+            echo "$SIGN_CRT" > "$CRT"
+            echo "$SIGN_KEY" > "$KEY"
+            chmod 600 $KEY
+
+            CA=""
+            if [ -n "$CA_CRT" ]; then
+              CA="$CERTS_PATH/ca.crt"
+              echo "$CA_CRT" > "$CA"
+            fi
+
+            openssl verify -CAfile $CA $CRT
+
+            for file in build/*.qpkg; do
+              env CA_CERTS="$CA" QNAP_CERT="$CRT" PRIVATE_KEY="$KEY" \
+              qbuild --add-code-signing "$file" -v
+            done
+
+            rm -rf $CERTS_PATH
+          else
+            echo "未发现签名证书和私钥"
+          fi
+
+          echo "QPKG 构建成功"
+          ls -lh build
+
+      - name: Prepare Release Files
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p $RUNNER_TEMP/qpkg-release
+          cd build
+          
+          for file in *.qpkg; do
+            if [[ "$file" == *"x86_64"* ]] || [[ "$file" == *"x86-64"* ]] || [[ "$file" == *"amd64"* ]]; then
+              NEW_NAME="qnap-qbittorrent_${VERSION}_x86_64.qpkg"
+            elif [[ "$file" == *"arm_64"* ]] || [[ "$file" == *"arm-64"* ]] || [[ "$file" == *"aarch64"* ]] || [[ "$file" == *"arm64"* ]]; then
+              NEW_NAME="qnap-qbittorrent_${VERSION}_arm_64.qpkg"
+            else
+              echo "未知架构文件，跳过: $file"
+              continue
+            fi
+            cp "$file" "$RUNNER_TEMP/qpkg-release/$NEW_NAME"
+            echo "已复制并重命名: $NEW_NAME"
+          done
+
+          cd $RUNNER_TEMP/qpkg-release
+          for file in *.qpkg; do
+            md5sum "$file" > "${file}.md5"
+            echo "已生成校验: ${file}.md5"
+          done
+          ls -lh
+
+      - name: Commit Version Bump
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          #sed -i 's/^QPKG_VER=.*/QPKG_VER="'"${VERSION}"'"/' qpkg.cfg
+          #sed -i 's/^Ver=.*/Ver='"${VERSION}"'/' package_routines
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add qpkg.cfg package_routines
+
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: bump qBittorrent version to v${VERSION}"
+            git push origin HEAD:main
+          fi
+
+      - name: Create Git Tag
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git tag -a "v${VERSION}" -m "Release qBittorrent QPKG v${VERSION}"
+          git push origin "v${VERSION}"
+
+      - name: Delete Existing Release
+        if: steps.check.outputs.exists == 'false' && github.event.inputs.force_build == 'true'
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const version = '${{ steps.version.outputs.version }}';
+            const tagName = `v${version}`;
+            try {
+              const release = await new Promise(resolve => {
+                github.rest.repos.getReleaseByTag({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag: tagName
+                }).then(resolve).catch(err => {
+                  resolve(err?.response?.data || null);
+                });
+              });
+
+              let release_id = release?.data?.id;
+
+              if (!release_id) {
+                // find draft release with matching tag
+                const releases = await github.rest.repos.listReleases({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  per_page: 100
+                });
+                const draft = releases.data.find(
+                  r => r.tag_name === tagName && r.draft
+                );
+                release_id = draft?.id;
+                if (!release_id) {
+                  console.log(`未找到 Release: ${tagName}`);
+                  return;
+                }
+              }
+
+              await github.rest.repos.deleteRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: release_id
+              });
+              console.log(`已删除旧的 Release: ${tagName}`);
+            } catch (error) {
+              console.log(`Release ${tagName} 不存在或已删除`);
+            }
+
+      - name: Prepare Release Notes
+        id: notes
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          NOTES="${{ github.event.inputs.notes }}"
+
+          if [ -z "$NOTES" ]; then
+            UPSTREAM_NOTES=$(curl -s "https://api.github.com/repos/qbittorrent/qBittorrent/releases/latest" \
+              | jq -r '.body' 2>/dev/null || echo "")
+            if [ -n "$UPSTREAM_NOTES" ] && [ "$UPSTREAM_NOTES" != "null" ]; then
+              NOTES="更新至 v${VERSION}"$'\n\n'"## 上游更新说明"$'\n'"${UPSTREAM_NOTES}"
+            else
+              NOTES="更新至 v${VERSION}"
+            fi
+          fi
+
+          echo "notes: $NOTES"
+
+          {
+            echo "notes<<EOF"
+            echo "$NOTES"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+          echo "✅ 更新说明已准备"
+
+      - name: Create GitHub Release
+        if: steps.check.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: "v${{ steps.version.outputs.version }}"
+          files: "${{ runner.temp }}/qpkg-release/*"
+          body: |
+            # qBittorrent for QNAP v${{ steps.version.outputs.version }}
+            ## 更新说明
+            > Built with QDK (QNAP Development Kit) 
+
+            ${{ steps.notes.outputs.notes }}
+
+            ## 安装方法
+            1. 下载对应架构的 `.qpkg` 文件
+            2. 登录 QNAP 管理界面 → App Center
+            3. 点击右上角齿轮图标 → 安装应用程序
+            4. 选择下载的 `.qpkg` 文件进行安装
+
+            ## 支持的架构
+            - **x86_64**：Intel/AMD 64位处理器
+            - **arm_64**：ARM 64位处理器（aarch64）
+
+            ## Build Information
+            - Version: ${{ steps.version.outputs.version }}
+            - Commit: ${{ github.sha }}
+            - qBittorrent Upstream: https://github.com/qbittorrent/qbittorrent
+          draft: true
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Artifacts
+        if: steps.check.outputs.exists == 'false'
+        uses: actions/upload-artifact@v7
+        with:
+          name: qBittorrent-QPKG-v${{ steps.version.outputs.version }}
+          path: "${{ runner.temp }}/qpkg-release/*"
+          retention-days: 30
+
+      - name: Build Summary
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          FORCE="${{ github.event.inputs.force_build }}"
+
+          if [ "$FORCE" = "true" ]; then
+            echo "### 🔄 qBittorrent QPKG v${VERSION} 强制重新构建成功" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ✅ qBittorrent QPKG v${VERSION} 构建成功" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**构建的文件:**" >> $GITHUB_STEP_SUMMARY
+          cd $RUNNER_TEMP/qpkg-release
+          for file in *.qpkg; do
+            size=$(du -h "$file" | cut -f1)
+            echo "- ${file} (${size})" >> $GITHUB_STEP_SUMMARY
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Release:** https://github.com/${{ github.repository }}/releases/tag/v${VERSION}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Skip Summary
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "### ⏭️ 版本 v${VERSION} 已存在，跳过构建" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "💡 如需重新构建，请勾选 '强制构建' 选项" >> $GITHUB_STEP_SUMMARY

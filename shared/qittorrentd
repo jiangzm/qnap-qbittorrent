@@ -1,0 +1,88 @@
+#!/bin/sh
+CONF=/etc/config/qpkg.conf
+QPKG_NAME="qbt"
+QPKG_ROOT=$(/sbin/getcfg $QPKG_NAME Install_Path -f ${CONF})
+QPKG_WEB_PORT=$(/sbin/getcfg $QPKG_NAME Web_Port -f ${CONF})
+QBT_CONFIG="$QPKG_ROOT/.config/qBittorrent/qBittorrent.conf"
+QBT_DOWNLOADS_PATH="/share/Public/QBTDownloads"
+QBT_LOG="/var/log/qbt.log"
+QBT_PID="/var/run/qbt.pid"
+
+export XDG_DATA_HOME="$QPKG_ROOT/.data"
+export XDG_CACHE_HOME="$QPKG_ROOT/.cache"
+export XDG_CONFIG_HOME="$QPKG_ROOT/.config"
+
+case "$1" in
+  start)
+    ENABLED=$(/sbin/getcfg $QPKG_NAME Enable -u -d FALSE -f $CONF)
+    if [ "$ENABLED" != "TRUE" ]; then
+      echo "$QPKG_NAME is disabled."
+      exit 1
+    fi
+
+    /bin/ln -sf $QPKG_ROOT /opt/$QPKG_NAME
+
+    cd $QPKG_ROOT
+
+    if [ ! -f $QBT_CONFIG ]; then
+      mkdir -p "$(dirname $QBT_CONFIG)"
+      echo "creating default config $QBT_CONFIG"
+      cat << EOF > "$QBT_CONFIG"
+[BitTorrent]
+Session\DefaultSavePath=$QBT_DOWNLOADS_PATH
+Session\Port=6881
+[LegalNotice]
+Accepted=true
+[WebUI]
+Port=$QPKG_WEB_PORT
+HostHeaderValidation=true
+EOF
+    fi
+
+    ./qbittorrent-nox --webui-port=$QPKG_WEB_PORT > $QBT_LOG 2>&1 & echo $! > $QBT_PID
+
+    sleep 3
+
+    ### check if password
+
+    if grep -q "temporary password" $QBT_LOG; then
+      
+      echo "qbittorrent admin password not set"
+
+      export TEMP_PASS=$(awk '{for(i=0;i<=NF;i++) if (tolower($i)=="session:") print $(i+1)}' $QBT_LOG);
+
+      #send temp pass to log
+
+      /sbin/log_tool  -t1 -uSystem -p127.0.0.1 -mlocalhost -a "[QBittorrent] the temporary password from is $TEMP_PASS"
+
+    else
+        echo "qbittorrent admin password already set"
+    fi
+
+    ;;
+
+  stop)
+
+    ID=$(more $QBT_PID)
+    if [ -e $QBT_PID ]; then
+        kill -9 $ID
+        rm -f $QBT_PID
+    fi
+
+    killall -9 qbittorrent-nox
+
+    rm -rf /opt/$QPKG_NAME
+
+    ;;
+
+  restart)
+    $0 stop
+    $0 start
+    ;;
+
+  *)
+    echo "Usage: $0 {start|stop|restart}"
+    exit 1
+esac
+
+exit 0
