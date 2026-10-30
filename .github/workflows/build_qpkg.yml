@@ -90,8 +90,8 @@ jobs:
           BASE_URL="https://github.com/jiangzm/qbittorrent-nox-static/releases/download/v${VERSION}"
 
           declare -A ARCH_FILES=(
-            ["x86_64"]="qbittorrent-nox-${VERSION}_lt2.1-aarch64"
-            ["arm_64"]="qbittorrent-nox-${VERSION}_lt2.1-x86_64"
+            ["x86_64"]="qbittorrent-nox-${VERSION}_lt2.1-x86_64"
+            ["arm_64"]="qbittorrent-nox-${VERSION}_lt2.1-aarch64"
           )
 
           mkdir -p $RUNNER_TEMP/qbittorrent-bin
