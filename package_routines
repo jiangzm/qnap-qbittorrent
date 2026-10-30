@@ -133,20 +133,23 @@
 
 CONF=/etc/config/qpkg.conf
 QPKG_NAME="qbt"
-QPKG_ROOT=$(/sbin/getcfg $QPKG_NAME Install_Path -f ${CONF})
-QPKG_WEB_PORT=$(/sbin/getcfg $QPKG_NAME Web_Port -f ${CONF})
-QBT_CONFIG="$QPKG_ROOT/.config/qBittorrent/qBittorrent.conf"
-QBT_DOWNLOADS_PATH="/share/Public/QBTDownloads"
 
 Ver=5.3.0
 
 pkg_pre_install() {
+  QPKG_ROOT=$(/sbin/getcfg $QPKG_NAME Install_Path -f ${CONF})
+  QBT_CONFIG="$QPKG_ROOT/.config/qBittorrent/qBittorrent.conf"
+
   if [ -f $QBT_CONFIG ]; then
 		killall qbittorrent-nox
   fi
 }
 
 pkg_post_install() {
+  QPKG_ROOT=$(/sbin/getcfg $QPKG_NAME Install_Path -f ${CONF})
+  QPKG_WEB_PORT=$(/sbin/getcfg $QPKG_NAME Web_Port -f ${CONF})
+  QBT_CONFIG="$QPKG_ROOT/.config/qBittorrent/qBittorrent.conf"
+  QBT_DOWNLOADS_PATH="/share/Public/QBTDownloads"
 
   if [ ! -f $QBT_CONFIG ]; then
     mkdir -p "$(dirname $QBT_CONFIG)"
@@ -158,9 +161,13 @@ Session\Port=6881
 [LegalNotice]
 Accepted=true
 [WebUI]
-Port=$QPKG_WEB_PORT
+Port=${QPKG_WEB_PORT:-8080}
 HostHeaderValidation=true
 EOF
+  fi
+
+  if [ ! -d $QBT_DOWNLOADS_PATH ]; then
+    mkdir -p $QBT_DOWNLOADS_PATH
   fi
 
   chmod +x $QPKG_ROOT/qbittorrent-nox

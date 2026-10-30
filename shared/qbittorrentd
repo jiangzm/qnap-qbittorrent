@@ -8,6 +8,7 @@ QBT_DOWNLOADS_PATH="/share/Public/QBTDownloads"
 QBT_LOG="/var/log/qbt.log"
 QBT_PID="/var/run/qbt.pid"
 
+export USER=admin
 export XDG_DATA_HOME="$QPKG_ROOT/.data"
 export XDG_CACHE_HOME="$QPKG_ROOT/.cache"
 export XDG_CONFIG_HOME="$QPKG_ROOT/.config"
