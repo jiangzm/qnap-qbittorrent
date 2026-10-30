@@ -134,10 +134,34 @@
 CONF=/etc/config/qpkg.conf
 QPKG_NAME="qbt"
 QPKG_ROOT=$(/sbin/getcfg $QPKG_NAME Install_Path -f ${CONF})
+QPKG_WEB_PORT=$(/sbin/getcfg $QPKG_NAME Web_Port -f ${CONF})
+QBT_CONFIG="$QPKG_ROOT/.config/qBittorrent/qBittorrent.conf"
+QBT_DOWNLOADS_PATH="/share/Public/QBTDownloads"
+
 Ver=5.3.0
 
 pkg_pre_install() {
+  if [ -f $QBT_CONFIG ]; then
+		killall qbittorrent-nox
+  fi
 }
 
 pkg_post_install() {
+
+  if [ ! -f $QBT_CONFIG ]; then
+    mkdir -p "$(dirname $QBT_CONFIG)"
+    echo "creating default config $QBT_CONFIG"
+    cat << EOF > "$QBT_CONFIG"
+[BitTorrent]
+Session\DefaultSavePath=$QBT_DOWNLOADS_PATH
+Session\Port=6881
+[LegalNotice]
+Accepted=true
+[WebUI]
+Port=$QPKG_WEB_PORT
+HostHeaderValidation=true
+EOF
+  fi
+
+  chmod +x $QPKG_ROOT/qbittorrent-nox
 }

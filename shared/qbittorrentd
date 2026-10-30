@@ -24,21 +24,6 @@ case "$1" in
 
     cd $QPKG_ROOT
 
-    if [ ! -f $QBT_CONFIG ]; then
-      mkdir -p "$(dirname $QBT_CONFIG)"
-      echo "creating default config $QBT_CONFIG"
-      cat << EOF > "$QBT_CONFIG"
-[BitTorrent]
-Session\DefaultSavePath=$QBT_DOWNLOADS_PATH
-Session\Port=6881
-[LegalNotice]
-Accepted=true
-[WebUI]
-Port=$QPKG_WEB_PORT
-HostHeaderValidation=true
-EOF
-    fi
-
     ./qbittorrent-nox --webui-port=$QPKG_WEB_PORT > $QBT_LOG 2>&1 & echo $! > $QBT_PID
 
     sleep 3
